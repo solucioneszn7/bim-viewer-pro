@@ -274,8 +274,9 @@ export function PlanManager() {
                       <Button size="sm" variant="ghost"
                         onClick={e => {
                           e.stopPropagation();
-                          setPlans(prev => prev.filter(p => p.id !== plan.id));
-                          if (selectedPlan?.id === plan.id) setSelectedPlan(null);
+                          const id = plan.id;
+                          setPlans(prev => prev.filter(p => p.id !== id));
+                          setSelectedPlan(cur => (cur?.id === id ? null : cur));
                         }}
                         className="h-6 w-6 p-0 text-slate-400 hover:text-red-400">
                         <Trash2 className="w-3 h-3" />

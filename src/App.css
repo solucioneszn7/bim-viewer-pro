@@ -1,0 +1,115 @@
+/* BIM Viewer Pro - Custom Styles */
+
+/* Three.js canvas styling */
+canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Tree node transitions */
+.tree-node {
+  transition: background-color 0.15s ease;
+}
+
+/* Issue card animation */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.issue-card {
+  animation: slideIn 0.2s ease-out;
+}
+
+/* Loading spinner animation */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+}
+
+.loading-pulse {
+  animation: pulse-ring 1.5s ease-in-out infinite;
+}
+
+/* Tooltip animation override */
+[data-state="delayed-open"] {
+  animation: none;
+}
+
+/* Dialog overlay */
+[data-state="open"] {
+  animation: fadeIn 0.15s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Resizable panel handle */
+[data-panel-resize-handle-id] {
+  transition: background-color 0.15s ease;
+}
+
+[data-panel-resize-handle-id]:hover {
+  background-color: #10b981 !important;
+}
+
+/* Badge hover states */
+.badge-interactive:hover {
+  transform: scale(1.02);
+}
+
+/* Focus states for accessibility */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #10b981;
+  outline-offset: 1px;
+}
+
+/* Selection styling */
+::selection {
+  background-color: rgba(16, 185, 129, 0.3);
+  color: white;
+}

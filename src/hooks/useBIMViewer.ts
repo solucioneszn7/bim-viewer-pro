@@ -742,52 +742,167 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
     ));
   }, []);
 
-  /* ─── IFC Load (stub for now, delegates to ThatOpen) ─── */
+  /* ─── IFC Load — web-ifc direct parser ─── */
 
   const loadIfc = useCallback(async (file: File) => {
+    const sd = sceneRef.current;
+    if (!sd) return;
     setIsLoading(true);
-    setLoadingProgress(0);
+    setLoadingProgress(5);
+
     try {
-      const OBC = await import("@thatopen/components");
-      /* Dispose Three.js scene temporarily */
-      if (sceneRef.current) {
-        cancelAnimationFrame(sceneRef.current.animationId);
-        sceneRef.current.renderer.domElement.remove();
-      }
-
-      const container = containerRef.current;
-      if (!container) return;
-
-      const components = new (OBC as any).Components();
-      const worlds = (components as any).get((OBC as any).Worlds);
-      const world = (worlds as any).create();
-      world.scene = new (OBC as any).SimpleScene(components);
-      world.scene.setup();
-      world.renderer = new (OBC as any).SimpleRenderer(components, container);
-      world.camera = new (OBC as any).OrthoPerspectiveCamera(components);
-      if (world.camera.controls) {
-        await world.camera.controls.setLookAt(30, 20, 30, 0, 5, 0);
-      }
-      components.init();
-
-      const fragmentsManager = (components as any).get((OBC as any).FragmentsManager);
-      const workerUrl = await (OBC as any).FragmentsManager.getWorker();
-      (fragmentsManager as any).init(workerUrl);
-
-      (fragmentsManager as any).onFragmentsLoaded.add((model: any) => {
-        if (world.scene?.three) world.scene.three.add(model.object);
-        setModels(prev => [...prev, file.name]);
-      });
-
-      const ifcLoader = (components as any).get((OBC as any).IfcLoader);
-      await (ifcLoader as any).setup({ autoSetWasm: true });
+      /* Lazy-load web-ifc with WASM from CDN */
+      const WI = await import("web-ifc");
+      const api = new WI.IfcAPI();
+      api.SetWasmPath("https://unpkg.com/web-ifc@0.0.77/");
+      await api.Init();
+      setLoadingProgress(12);
 
       const buffer = new Uint8Array(await file.arrayBuffer());
-      await (ifcLoader as any).load(buffer, true, file.name, {
-        processData: {
-          progressCallback: (p: number) => setLoadingProgress(Math.round(p * 100)),
-        },
+      setLoadingProgress(18);
+
+      const modelID = api.OpenModel(buffer, {
+        COORDINATE_TO_ORIGIN: true,
+        USE_FAST_BOOLS: false,
       });
+      setLoadingProgress(25);
+
+      /* Category labels by IFC type code */
+      const CAT: Record<number, string> = {
+        [WI.IFCWALL]: "Muro", [WI.IFCWALLSTANDARDCASE]: "Muro",
+        [WI.IFCSLAB]: "Losa", [WI.IFCSLABSTANDARDCASE]: "Losa",
+        [WI.IFCBEAM]: "Viga", [WI.IFCBEAMSTANDARDCASE]: "Viga",
+        [WI.IFCCOLUMN]: "Columna", [WI.IFCCOLUMNSTANDARDCASE]: "Columna",
+        [WI.IFCDOOR]: "Puerta", [WI.IFCDOORSTANDARDCASE]: "Puerta",
+        [WI.IFCWINDOW]: "Ventana", [WI.IFCWINDOWSTANDARDCASE]: "Ventana",
+        [WI.IFCSTAIR]: "Escalera", [WI.IFCROOF]: "Cubierta",
+        [WI.IFCRAILING]: "Barandilla", [WI.IFCCOVERING]: "Revestimiento",
+        [WI.IFCMEMBER]: "Perfil", [WI.IFCMEMBERSTANDARDCASE]: "Perfil",
+        [WI.IFCPLATE]: "Placa", [WI.IFCPLATESTANDARDCASE]: "Placa",
+        [WI.IFCFLOWFITTING]: "Instalación - Fitting",
+        [WI.IFCFLOWSEGMENT]: "Instalación - Segmento",
+        [WI.IFCFLOWTERMINAL]: "Instalación - Terminal",
+        [WI.IFCFURNISHINGELEMENT]: "Mobiliario",
+        [WI.IFCBUILDINGELEMENTPROXY]: "Elemento Genérico",
+        [WI.IFCSPACE]: "Espacio",
+        [WI.IFCOPENINGELEMENT]: "Apertura",
+      };
+
+      /* Group all geometry under one Three.js node */
+      const modelGroup = new THREE.Group();
+      modelGroup.name = file.name;
+      sd.scene.add(modelGroup);
+
+      /* Stream geometry from IFC — main parse loop */
+      let meshCount = 0;
+      api.StreamAllMeshes(modelID, (flatMesh) => {
+        const geoms = flatMesh.geometries;
+        for (let i = 0; i < geoms.size(); i++) {
+          const g   = geoms.get(i);
+          const raw = api.GetGeometry(modelID, g.geometryExpressID);
+          const verts = api.GetVertexArray(raw.GetVertexDataSize(), raw.GetVertexData());
+          const idxs  = api.GetIndexArray(raw.GetIndexDataSize(), raw.GetIndexData());
+
+          /* Interleaved: [x,y,z, nx,ny,nz, …] */
+          const nv = verts.length / 6;
+          const pos  = new Float32Array(nv * 3);
+          const norm = new Float32Array(nv * 3);
+          for (let j = 0; j < nv; j++) {
+            pos[j*3]   = verts[j*6];   pos[j*3+1] = verts[j*6+1]; pos[j*3+2] = verts[j*6+2];
+            norm[j*3]  = verts[j*6+3]; norm[j*3+1]= verts[j*6+4]; norm[j*3+2]= verts[j*6+5];
+          }
+
+          const bufGeom = new THREE.BufferGeometry();
+          bufGeom.setAttribute("position", new THREE.BufferAttribute(pos,  3));
+          bufGeom.setAttribute("normal",   new THREE.BufferAttribute(norm, 3));
+          bufGeom.setIndex(new THREE.BufferAttribute(idxs, 1));
+
+          const c   = g.color;
+          const mat = new THREE.MeshLambertMaterial({
+            color: new THREE.Color(c.x, c.y, c.z),
+            opacity: c.w, transparent: c.w < 0.99,
+            side: THREE.DoubleSide,
+          });
+
+          const mesh = new THREE.Mesh(bufGeom, mat);
+          mesh.userData.expressID = flatMesh.expressID;
+          mesh.applyMatrix4(new THREE.Matrix4().fromArray(g.flatTransformation));
+          modelGroup.add(mesh);
+          sd.meshes.push(mesh);
+          raw.delete();
+        }
+        if (++meshCount % 200 === 0) {
+          setLoadingProgress(Math.min(88, 25 + Math.round(meshCount / 40)));
+        }
+      });
+      setLoadingProgress(90);
+
+      /* Extract element metadata for Model Browser */
+      const newElements: BIMElement[] = [];
+      const productTypeIds = [
+        WI.IFCWALL, WI.IFCWALLSTANDARDCASE, WI.IFCSLAB, WI.IFCSLABSTANDARDCASE,
+        WI.IFCBEAM, WI.IFCBEAMSTANDARDCASE, WI.IFCCOLUMN, WI.IFCCOLUMNSTANDARDCASE,
+        WI.IFCDOOR, WI.IFCDOORSTANDARDCASE, WI.IFCWINDOW, WI.IFCWINDOWSTANDARDCASE,
+        WI.IFCSTAIR, WI.IFCROOF, WI.IFCRAILING, WI.IFCCOVERING,
+        WI.IFCMEMBER, WI.IFCMEMBERSTANDARDCASE, WI.IFCPLATE, WI.IFCPLATESTANDARDCASE,
+        WI.IFCFLOWFITTING, WI.IFCFLOWSEGMENT, WI.IFCFLOWTERMINAL,
+        WI.IFCFURNISHINGELEMENT, WI.IFCBUILDINGELEMENTPROXY,
+      ];
+
+      for (const typeId of productTypeIds) {
+        try {
+          const lines = api.GetLineIDsWithType(modelID, typeId);
+          for (let i = 0; i < lines.size(); i++) {
+            const expressID = lines.get(i);
+            let name = `${CAT[typeId] ?? "Elemento"} ${expressID}`;
+            const properties: Record<string, string> = {};
+            try {
+              const line = api.GetLine(modelID, expressID, false);
+              if (line?.Name?.value) name = String(line.Name.value);
+            } catch { /* skip */ }
+            try {
+              const full = api.GetLine(modelID, expressID, true);
+              if (full?.IsDefinedBy) {
+                for (const rel of full.IsDefinedBy) {
+                  const pset = rel?.RelatingPropertyDefinition;
+                  if (!pset?.HasProperties) continue;
+                  for (const prop of pset.HasProperties) {
+                    if (prop?.Name?.value && prop?.NominalValue?.value !== undefined) {
+                      properties[String(prop.Name.value)] = String(prop.NominalValue.value);
+                    }
+                  }
+                }
+              }
+            } catch { /* skip */ }
+            newElements.push({
+              expressID, name,
+              type: CAT[typeId] ?? "Elemento",
+              category: CAT[typeId] ?? "Elemento",
+              dimensions: { length: 0, width: 0, height: 0, area: 0, volume: 0 },
+              properties,
+            });
+          }
+        } catch { /* skip type */ }
+      }
+
+      api.CloseModel(modelID);
+      setLoadingProgress(96);
+
+      /* Fit camera to bounding box */
+      const box = new THREE.Box3().setFromObject(modelGroup);
+      if (!box.isEmpty()) {
+        const center = box.getCenter(new THREE.Vector3());
+        const size   = box.getSize(new THREE.Vector3());
+        const d = Math.max(size.x, size.y, size.z);
+        sd.camera.position.set(center.x + d * 1.5, center.y + d, center.z + d * 1.5);
+        sd.controls.target.copy(center);
+        sd.controls.update();
+      }
+
+      setModels(prev => [...prev, file.name]);
+      setElements(prev => [...prev, ...newElements]);
+      setLoadingProgress(100);
+
     } catch (e) {
       console.error("IFC load error:", e);
     } finally {

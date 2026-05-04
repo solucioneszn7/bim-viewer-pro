@@ -763,7 +763,6 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
 
       const modelID = api.OpenModel(buffer, {
         COORDINATE_TO_ORIGIN: true,
-        USE_FAST_BOOLS: false,
       });
       setLoadingProgress(25);
 

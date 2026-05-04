@@ -188,7 +188,7 @@ export function PlanManager() {
     Array.from(e.dataTransfer.files).forEach(f => loadFile(f, activeLevel));
   }, [loadFile, activeLevel]);
 
-  const levelPlans = plans.filter(p => p.level === activeLevel);
+  const levelPlans: Plan[] = plans.filter(p => p.level === activeLevel);
 
   return (
     <div className="flex flex-col h-full text-white">

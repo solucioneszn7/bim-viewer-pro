@@ -799,8 +799,8 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
         for (let i = 0; i < geoms.size(); i++) {
           const g   = geoms.get(i);
           const raw = api.GetGeometry(modelID, g.geometryExpressID);
-          const verts = api.GetVertexArray(raw.GetVertexDataSize(), raw.GetVertexData());
-          const idxs  = api.GetIndexArray(raw.GetIndexDataSize(), raw.GetIndexData());
+          const verts = api.GetVertexArray(raw.GetVertexData(), raw.GetVertexDataSize());
+          const idxs  = api.GetIndexArray(raw.GetIndexData(), raw.GetIndexDataSize());
 
           /* Interleaved: [x,y,z, nx,ny,nz, …] */
           const nv = verts.length / 6;

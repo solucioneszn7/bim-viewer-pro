@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { FlatMesh as IfcFlatMesh } from "web-ifc";
 
 /* ─── Types ─── */
 
@@ -97,6 +98,7 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
   const [elements, setElements] = useState<BIMElement[]>([]);
   const [issues, setIssues] = useState<BIMIssue[]>([]);
   const [models, setModels] = useState<string[]>([]);
+  const modelCountRef = useRef(0); // tracks loaded model count for coordinate origin logic
 
   /* Tool modes */
   const [toolMode, setToolMode] = useState<ToolMode>("select");
@@ -742,7 +744,7 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
     ));
   }, []);
 
-  /* ─── IFC Load — web-ifc direct parser ─── */
+  /* ─── IFC Load — web-ifc, chunked async (non-blocking) ─── */
 
   const loadIfc = useCallback(async (file: File) => {
     const sd = sceneRef.current;
@@ -751,18 +753,21 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
     setLoadingProgress(5);
 
     try {
-      /* Lazy-load web-ifc with WASM from CDN */
+      /* Lazy-load web-ifc; WASM served locally at /web-ifc.wasm */
       const WI = await import("web-ifc");
       const api = new WI.IfcAPI();
-      api.SetWasmPath("https://unpkg.com/web-ifc@0.0.77/");
+      api.SetWasmPath("/");           // served from public/web-ifc.wasm → dist/
       await api.Init();
       setLoadingProgress(12);
 
       const buffer = new Uint8Array(await file.arrayBuffer());
       setLoadingProgress(18);
 
+      /* COORDINATE_TO_ORIGIN keeps each model near world-origin.
+         When loading multiple IFC files from the same project (same survey
+         point), set to false to preserve inter-model alignment. */
       const modelID = api.OpenModel(buffer, {
-        COORDINATE_TO_ORIGIN: true,
+        COORDINATE_TO_ORIGIN: modelCountRef.current === 0, // true for first model only
       });
       setLoadingProgress(25);
 
@@ -787,30 +792,30 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
         [WI.IFCOPENINGELEMENT]: "Apertura",
       };
 
-      /* Group all geometry under one Three.js node */
+      /* Group all geometry under one Three.js node per model */
       const modelGroup = new THREE.Group();
       modelGroup.name = file.name;
       sd.scene.add(modelGroup);
 
-      /* Stream geometry from IFC — main parse loop */
-      let meshCount = 0;
-      api.StreamAllMeshes(modelID, (flatMesh) => {
+      /* Helper: convert one FlatMesh geometry into a Three.js Mesh */
+      const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+
+      const processFlatMesh = (flatMesh: IfcFlatMesh) => {
         const geoms = flatMesh.geometries;
         for (let i = 0; i < geoms.size(); i++) {
           const g   = geoms.get(i);
           const raw = api.GetGeometry(modelID, g.geometryExpressID);
           const verts = api.GetVertexArray(raw.GetVertexData(), raw.GetVertexDataSize());
           const idxs  = api.GetIndexArray(raw.GetIndexData(), raw.GetIndexDataSize());
+          if (!verts.length || !idxs.length) { raw.delete(); continue; }
 
-          /* Interleaved: [x,y,z, nx,ny,nz, …] */
-          const nv = verts.length / 6;
+          const nv  = verts.length / 6;
           const pos  = new Float32Array(nv * 3);
           const norm = new Float32Array(nv * 3);
           for (let j = 0; j < nv; j++) {
             pos[j*3]   = verts[j*6];   pos[j*3+1] = verts[j*6+1]; pos[j*3+2] = verts[j*6+2];
             norm[j*3]  = verts[j*6+3]; norm[j*3+1]= verts[j*6+4]; norm[j*3+2]= verts[j*6+5];
           }
-
           const bufGeom = new THREE.BufferGeometry();
           bufGeom.setAttribute("position", new THREE.BufferAttribute(pos,  3));
           bufGeom.setAttribute("normal",   new THREE.BufferAttribute(norm, 3));
@@ -822,7 +827,6 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
             opacity: c.w, transparent: c.w < 0.99,
             side: THREE.DoubleSide,
           });
-
           const mesh = new THREE.Mesh(bufGeom, mat);
           mesh.userData.expressID = flatMesh.expressID;
           mesh.applyMatrix4(new THREE.Matrix4().fromArray(g.flatTransformation));
@@ -830,14 +834,12 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
           sd.meshes.push(mesh);
           raw.delete();
         }
-        if (++meshCount % 200 === 0) {
-          setLoadingProgress(Math.min(88, 25 + Math.round(meshCount / 40)));
-        }
-      });
-      setLoadingProgress(90);
+      };
 
-      /* Extract element metadata for Model Browser */
-      const newElements: BIMElement[] = [];
+      /* ── Chunked async geometry loading ──
+         Collect all product expressIDs, then stream in chunks of 40
+         with a setTimeout(0) yield between each chunk so the browser
+         stays responsive (avoids "Page Unresponsive" kill). */
       const productTypeIds = [
         WI.IFCWALL, WI.IFCWALLSTANDARDCASE, WI.IFCSLAB, WI.IFCSLABSTANDARDCASE,
         WI.IFCBEAM, WI.IFCBEAMSTANDARDCASE, WI.IFCCOLUMN, WI.IFCCOLUMNSTANDARDCASE,
@@ -847,6 +849,28 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
         WI.IFCFLOWFITTING, WI.IFCFLOWSEGMENT, WI.IFCFLOWTERMINAL,
         WI.IFCFURNISHINGELEMENT, WI.IFCBUILDINGELEMENTPROXY,
       ];
+
+      const allIDs: number[] = [];
+      for (const typeId of productTypeIds) {
+        try {
+          const lines = api.GetLineIDsWithType(modelID, typeId);
+          for (let i = 0; i < lines.size(); i++) allIDs.push(lines.get(i));
+        } catch { /* skip */ }
+      }
+      setLoadingProgress(30);
+
+      const CHUNK = 40;
+      for (let i = 0; i < allIDs.length; i += CHUNK) {
+        const chunk = allIDs.slice(i, i + CHUNK);
+        api.StreamMeshes(modelID, chunk, processFlatMesh);
+        const pct = 30 + Math.round(((i + CHUNK) / Math.max(allIDs.length, 1)) * 55);
+        setLoadingProgress(Math.min(85, pct));
+        await yield_();   // ← yield to browser every 40 elements
+      }
+      setLoadingProgress(87);
+
+      /* Extract element metadata for Model Browser (reuse allIDs per type) */
+      const newElements: BIMElement[] = [];
 
       for (const typeId of productTypeIds) {
         try {
@@ -898,6 +922,7 @@ export function useBIMViewer(containerRef: React.RefObject<HTMLDivElement | null
         sd.controls.update();
       }
 
+      modelCountRef.current += 1;
       setModels(prev => [...prev, file.name]);
       setElements(prev => [...prev, ...newElements]);
       setLoadingProgress(100);

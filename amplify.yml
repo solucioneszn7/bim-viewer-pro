@@ -7,6 +7,7 @@ frontend:
         - nvm use 22
         - node --version
         - npm ci --include=dev
+        - mkdir -p public && cp node_modules/web-ifc/web-ifc.wasm public/web-ifc.wasm
     build:
       commands:
         - npm run build
@@ -17,3 +18,10 @@ frontend:
   cache:
     paths:
       - node_modules/**/*
+  customHeaders:
+    - pattern: '**/*'
+      headers:
+        - key: 'Cross-Origin-Opener-Policy'
+          value: 'same-origin'
+        - key: 'Cross-Origin-Embedder-Policy'
+          value: 'require-corp'
